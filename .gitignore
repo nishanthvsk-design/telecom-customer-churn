@@ -1,49 +1,211 @@
-# History files
-.Rhistory
-.Rapp.history
+# ------------------------------------------------------
+# Telco Customer Churn Dashboard (Polished)
+# ------------------------------------------------------
+# Install once if needed:
+# install.packages(c("shiny","tidyverse","scales","viridis","bslib","shinycssloaders","ragg"))
 
-# Session Data files
-.RData
-.RDataTmp
+library(shiny)
+library(tidyverse)
+library(scales)
+library(viridis)
+library(bslib)             # modern Bootstrap theming
+library(shinycssloaders)   # spinners while plots load
+library(ragg)              # crisp PNG export
 
-# User-specific files
-.Ruserdata
+author_name <- "Nishanth Seenivasakap"
 
-# Example code in package build process
-*-Ex.R
+# ---- Data ----
+churn <- read.csv("WA_Fn-UseC_-Telco-Customer-Churn.csv", stringsAsFactors = FALSE) |>
+  mutate(
+    TotalCharges = as.numeric(gsub(" ", "", TotalCharges)),
+    Contract = factor(Contract, levels = c("Month-to-month","One year","Two year")),
+    InternetService = factor(InternetService, levels = c("DSL","Fiber optic","No")),
+    Churn = factor(Churn, levels = c("No","Yes"))
+  ) |>
+  tidyr::drop_na(TotalCharges)
 
-# Output files from R CMD build
-/*.tar.gz
+# Helper choices with "All"
+contract_choices <- c("All", levels(churn$Contract))
+internet_choices <- c("All", levels(churn$InternetService))
 
-# Output files from R CMD check
-/*.Rcheck/
+# ---- UI ----
+ui <- page_fluid(
+  theme = bs_theme(
+    version = 5,
+    bootswatch = "cosmo",          # try "cyborg" for dark, "flatly", "lux", etc.
+    base_font = font_google("Poppins"),
+    heading_font = font_google("Poppins")
+  ),
+  tags$head(tags$style(HTML("
+    .kpi-card{border:1px solid #e9ecef;border-radius:12px;padding:14px 16px;
+              background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.03)}
+    .kpi-label{color:#6b7280;font-size:13px;margin-bottom:6px}
+    .kpi-value{font-size:22px;font-weight:800;color:#111827}
+    .credit{color:#6b7280;font-weight:700;text-align:center;margin-top:8px}
+  "))),
+  titlePanel("📊 Telco Customer Churn Dashboard"),
+  layout_sidebar(
+    sidebar = sidebar(
+      h5("Filters"),
+      selectInput("contractInput","Contract Type:", choices = contract_choices, selected = "Month-to-month"),
+      selectInput("internetInput","Internet Service:", choices = internet_choices, selected = "Fiber optic"),
+      sliderInput("tenureInput","Tenure Range (Months):", min = 0, max = 72, value = c(0,72)),
+      hr(),
+      strong(paste("✨ Visualization by", author_name,"✨")),
+      em("Interactive Churn Insights | #DataAnalytics #RShiny #Visualization"),
+      hr(),
+      downloadButton("dl_plot","⬇️ Download Dashboard PNG")
+    ),
+    card(
+      card_header("Key Metrics"),
+      fluidRow(
+        column(3, div(class="kpi-card",
+                      div(class="kpi-label","Total Customers"),
+                      div(class="kpi-value", textOutput("kpi_n", inline = TRUE))
+        )),
+        column(3, div(class="kpi-card",
+                      div(class="kpi-label","Overall Churn Rate"),
+                      div(class="kpi-value", textOutput("kpi_cr", inline = TRUE))
+        )),
+        column(3, div(class="kpi-card",
+                      div(class="kpi-label","Avg Monthly Charges"),
+                      div(class="kpi-value", textOutput("kpi_mc", inline = TRUE))
+        )),
+        column(3, div(class="kpi-card",
+                      div(class="kpi-label","Avg Tenure (months)"),
+                      div(class="kpi-value", textOutput("kpi_tn", inline = TRUE))
+        ))
+      )
+    ),
+    navset_card_pill(
+      nav("Overview", withSpinner(plotOutput("churnPlot"), type = 6)),
+      nav("Monthly Charges", withSpinner(plotOutput("monthlyPlot"), type = 6)),
+      nav("Tenure Distribution", withSpinner(plotOutput("tenurePlot"), type = 6)),
+      nav("Contract & Internet", withSpinner(plotOutput("contractPlot"), type = 6))
+    ),
+    div(class="credit", paste("©", format(Sys.Date(), "%Y"), "-", author_name))
+  )
+)
 
-# RStudio files
-.Rproj.user/
+# ---- Server ----
+server <- function(input, output, session){
+  
+  # KPIs
+  output$kpi_n  <- renderText(scales::comma(nrow(churn)))
+  output$kpi_cr <- renderText(scales::percent(mean(churn$Churn == "Yes"), 0.1))
+  output$kpi_mc <- renderText(sprintf("$%0.2f", mean(churn$MonthlyCharges, na.rm = TRUE)))
+  output$kpi_tn <- renderText(sprintf("%0.1f", mean(churn$tenure, na.rm = TRUE)))
+  
+  # Reactive filter with "All"
+  filteredData <- reactive({
+    d <- churn
+    if (input$contractInput != "All") {
+      d <- d |> filter(Contract == input$contractInput)
+    }
+    if (input$internetInput != "All") {
+      d <- d |> filter(InternetService == input$internetInput)
+    }
+    d |> filter(between(tenure, input$tenureInput[1], input$tenureInput[2]))
+  })
+  
+  # Plot theme + palette
+  base_theme <- theme_minimal(base_size = 14) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "#E9EEF3"),
+      plot.title = element_text(face = "bold")
+    )
+  
+  # 1) Churn Distribution
+  output$churnPlot <- renderPlot({
+    ggplot(filteredData(), aes(Churn, fill = Churn)) +
+      geom_bar(width = 0.6, show.legend = FALSE) +
+      scale_fill_viridis(discrete = TRUE, option = "C", end = .9) +
+      labs(title = "Churn Distribution", x = NULL, y = "Count") +
+      base_theme
+  }, res = 110)
+  
+  # 2) Monthly Charges by Churn
+  output$monthlyPlot <- renderPlot({
+    ggplot(filteredData(), aes(Churn, MonthlyCharges, fill = Churn)) +
+      geom_boxplot(alpha = 0.9, width = .6, outlier.shape = 21, outlier.alpha = .35, show.legend = FALSE) +
+      scale_fill_viridis(discrete = TRUE, option = "B", end = .9) +
+      labs(title = "Monthly Charges by Churn", x = NULL, y = "Monthly Charges ($)") +
+      base_theme
+  }, res = 110)
+  
+  # 3) Tenure Distribution
+  output$tenurePlot <- renderPlot({
+    ggplot(filteredData(), aes(tenure, fill = Churn)) +
+      geom_density(alpha = .45, color = NA) +
+      scale_fill_viridis(discrete = TRUE, option = "A", end = .95) +
+      labs(title = "Tenure Distribution by Churn", x = "Tenure (months)", y = "Density") +
+      base_theme
+  }, res = 110)
+  
+  # 4) Contract vs Internet (proportions)
+  output$contractPlot <- renderPlot({
+    d <- churn |>
+      count(Contract, Churn) |>
+      group_by(Contract) |>
+      mutate(prop = n / sum(n)) |>
+      ungroup()
+    
+    ggplot(d, aes(Contract, prop, fill = Churn)) +
+      geom_col(position = "fill") +
+      scale_y_continuous(labels = percent) +
+      scale_fill_viridis(discrete = TRUE, option = "E", end = .9) +
+      labs(title = "Churn by Contract Type", x = "Contract Type", y = "Proportion") +
+      base_theme
+  }, res = 110)
+  
+  # ---- Download PNG of a combined dashboard snapshot ----
+  output$dl_plot <- downloadHandler(
+    filename = function() sprintf("Telco_Churn_Dashboard_%s.png", Sys.Date()),
+    content = function(file) {
+      # Save a simple stitched PNG (grid of 2x2 using patchwork-like base grid)
+      # For simplicity, re-draw the four main panels to one device:
+      agg_png(file, width = 1600, height = 1000, scaling = 1.5)
+      par(mfrow = c(2,2), mar = c(4,4,3,1))
+      print(ggplotGrob(
+        ggplot(filteredData(), aes(Churn, fill = Churn)) +
+          geom_bar(width=0.6, show.legend = FALSE) +
+          scale_fill_viridis(discrete = TRUE, option = "C", end = .9) +
+          labs(title = "Churn Distribution", x = NULL, y = "Count") +
+          base_theme
+      ))
+      print(ggplotGrob(
+        ggplot(filteredData(), aes(Churn, MonthlyCharges, fill = Churn)) +
+          geom_boxplot(alpha = .9, width=.6, outlier.shape = 21, outlier.alpha = .35, show.legend = FALSE) +
+          scale_fill_viridis(discrete = TRUE, option = "B", end = .9) +
+          labs(title = "Monthly Charges by Churn", x = NULL, y = "Monthly Charges ($)") +
+          base_theme
+      ))
+      print(ggplotGrob(
+        ggplot(filteredData(), aes(tenure, fill = Churn)) +
+          geom_density(alpha = .45, color = NA) +
+          scale_fill_viridis(discrete = TRUE, option = "A", end = .95) +
+          labs(title = "Tenure Distribution by Churn", x = "Tenure (months)", y = "Density") +
+          base_theme
+      ))
+      d <- churn |>
+        count(Contract, Churn) |>
+        group_by(Contract) |>
+        mutate(prop = n / sum(n)) |>
+        ungroup()
+      print(ggplotGrob(
+        ggplot(d, aes(Contract, prop, fill = Churn)) +
+          geom_col(position = "fill") +
+          scale_y_continuous(labels = percent) +
+          scale_fill_viridis(discrete = TRUE, option = "E", end = .9) +
+          labs(title = "Churn by Contract Type", x = "Contract Type", y = "Proportion") +
+          base_theme
+      ))
+      dev.off()
+    }
+  )
+}
 
-# produced vignettes
-vignettes/*.html
-vignettes/*.pdf
+shinyApp(ui, server)
 
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
-.httr-oauth
 
-# knitr and R markdown default cache directories
-*_cache/
-/cache/
-
-# Temporary files created by R markdown
-*.utf8.md
-*.knit.md
-
-# R Environment Variables
-.Renviron
-
-# pkgdown site
-docs/
-
-# translation temp files
-po/*~
-
-# RStudio Connect folder
-rsconnect/
